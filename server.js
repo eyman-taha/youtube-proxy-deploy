@@ -13,8 +13,7 @@ app.get("/", (req, res) => {
   res.json({
     name: "YouTube Audio Proxy",
     version: "1.0.0",
-    status: "running",
-    usage: "/audio?videoId=VIDEO_ID"
+    status: "running"
   });
 });
 
@@ -31,6 +30,14 @@ app.get("/audio", async (req, res) => {
     
     const youtubeUrl = `https://www.youtube.com/watch?v=${videoId}`;
     
+    // Check if yt-dlp exists
+    try {
+      execSync("which yt-dlp || echo NOT_FOUND", { stdio: "pipe" });
+    } catch (e) {
+      console.log("[proxy] yt-dlp not found, installing...");
+      execSync("pip3 install yt-dlp", { stdio: "inherit" });
+    }
+    
     // Run yt-dlp to get audio URL
     const command = `yt-dlp -f "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio" -g --no-playlist --no-warnings "${youtubeUrl}"`;
     
@@ -39,8 +46,7 @@ app.get("/audio", async (req, res) => {
         console.error(`[proxy] Error: ${stderr || error.message}`);
         return res.status(500).json({ 
           error: "Failed to extract audio", 
-          details: stderr || error.message,
-          videoId 
+          details: stderr || error.message 
         });
       }
       
@@ -50,11 +56,11 @@ app.get("/audio", async (req, res) => {
         console.error(`[proxy] Invalid URL: ${audioUrl}`);
         return res.status(500).json({ 
           error: "Invalid audio URL returned",
-          videoId 
+          raw: stdout
         });
       }
       
-      console.log(`[proxy] Success! URL length: ${audioUrl.length}`);
+      console.log(`[proxy] Success!`);
       
       res.json({
         success: true,
@@ -72,6 +78,4 @@ app.get("/audio", async (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`YouTube Audio Proxy running on port ${PORT}`);
-  console.log(`Health: http://localhost:${PORT}/`);
-  console.log(`Audio: http://localhost:${PORT}/audio?videoId=VIDEO_ID`);
 });
