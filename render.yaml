@@ -5,7 +5,10 @@ services:
     region: oregon
     buildCommand: npm install
     startCommand: npm start
-    healthCheckPath: /
+    healthCheckPath: /health
+    autoDeploy: true
     envVars:
       - key: NODE_ENV
         value: production
+      - key: YTDLP_NO_UPDATE
+        value: "1"
