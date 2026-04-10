@@ -1,5 +1,5 @@
 import express from "express";
-import fetch from "node-fetch";
+import { execSync, exec } from "child_process";
 import cors from "cors";
 
 const app = express();
@@ -8,45 +8,70 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-app.get("/proxy", async (req, res) => {
+// Health check
+app.get("/", (req, res) => {
+  res.json({
+    name: "YouTube Audio Proxy",
+    version: "1.0.0",
+    status: "running",
+    usage: "/audio?videoId=VIDEO_ID"
+  });
+});
+
+// Get audio URL using yt-dlp
+app.get("/audio", async (req, res) => {
+  const { videoId } = req.query;
+  
+  if (!videoId) {
+    return res.status(400).json({ error: "Missing videoId parameter" });
+  }
+  
   try {
-    const { url, videoId } = req.query;
+    console.log(`[proxy] Getting audio for: ${videoId}`);
     
-    if (!url && !videoId) {
-      return res.status(400).json({ error: "Missing url or videoId parameter" });
-    }
+    const youtubeUrl = `https://www.youtube.com/watch?v=${videoId}`;
     
-    let targetUrl = url;
+    // Run yt-dlp to get audio URL
+    const command = `yt-dlp -f "bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio" -g --no-playlist --no-warnings "${youtubeUrl}"`;
     
-    if (videoId && !url) {
-      targetUrl = `https://www.youtube.com/watch?v=${videoId}`;
-    }
+    exec(command, { timeout: 30000 }, (error, stdout, stderr) => {
+      if (error) {
+        console.error(`[proxy] Error: ${stderr || error.message}`);
+        return res.status(500).json({ 
+          error: "Failed to extract audio", 
+          details: stderr || error.message,
+          videoId 
+        });
+      }
+      
+      const audioUrl = stdout.trim();
+      
+      if (!audioUrl || !audioUrl.startsWith("http")) {
+        console.error(`[proxy] Invalid URL: ${audioUrl}`);
+        return res.status(500).json({ 
+          error: "Invalid audio URL returned",
+          videoId 
+        });
+      }
+      
+      console.log(`[proxy] Success! URL length: ${audioUrl.length}`);
+      
+      res.json({
+        success: true,
+        videoId,
+        audioUrl,
+        thumbnail: `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`
+      });
+    });
     
-    console.log(`[proxy] Fetching: ${targetUrl}`);
-    
-    const response = await fetch(targetUrl);
-    const data = await response.text();
-    
-    res.set("Content-Type", "text/plain");
-    res.send(data);
   } catch (err) {
-    console.error(`[proxy] Error: ${err.message}`);
+    console.error(`[proxy] Exception: ${err.message}`);
     res.status(500).json({ error: err.message });
   }
 });
 
-app.get("/", (req, res) => {
-  res.json({
-    name: "YouTube Proxy",
-    version: "1.0.0",
-    endpoints: {
-      proxy: "/proxy?url=VIDEO_URL",
-      youtube: "/proxy?videoId=VIDEO_ID"
-    },
-    example: "/proxy?videoId=dQw4w9WgXcQ"
-  });
-});
-
 app.listen(PORT, () => {
-  console.log(`Proxy server running on port ${PORT}`);
+  console.log(`YouTube Audio Proxy running on port ${PORT}`);
+  console.log(`Health: http://localhost:${PORT}/`);
+  console.log(`Audio: http://localhost:${PORT}/audio?videoId=VIDEO_ID`);
 });
