@@ -1,6 +1,11 @@
-{
-  "name": "youtube-proxy-deploy",
-  "runtime": "node",
-  "buildCommand": "pip3 install yt-dlp && npm install",
-  "startCommand": "node server.js"
-}
+services:
+  - type: web
+    name: youtube-proxy-deploy
+    env: node
+    region: oregon
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /
+    envVars:
+      - key: NODE_ENV
+        value: production
