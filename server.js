@@ -8,25 +8,55 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-// Invidious instances
-const INVIDIOUS_INSTANCES = [
-  "https://invidious.privacyredirect.com",
-  "https://invidious.snopyta.org",
-  "https://yewtu.be",
-  "https://invidious.lunar.icu"
-];
-
 // Health check
 app.get("/", (req, res) => {
   res.json({
     name: "YouTube Audio Proxy",
     version: "1.0.0",
     status: "running",
-    usage: "/audio?videoId=VIDEO_ID"
+    endpoints: {
+      audio: "/audio?videoId=VIDEO_ID",
+      info: "/info?videoId=VIDEO_ID"
+    }
   });
 });
 
-// Get audio URL using Invidious API
+// Get video info (title, thumbnail, duration)
+app.get("/info", async (req, res) => {
+  const { videoId } = req.query;
+  
+  if (!videoId) {
+    return res.status(400).json({ error: "Missing videoId parameter" });
+  }
+  
+  try {
+    console.log(`[proxy] Getting info for: ${videoId}`);
+    
+    // Use YouTube oEmbed API
+    const oembedUrl = `https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`;
+    const oembedResponse = await fetch(oembedUrl);
+    
+    if (!oembedResponse.ok) {
+      return res.status(404).json({ error: "Video not found" });
+    }
+    
+    const oembed = await oembedResponse.json();
+    
+    res.json({
+      success: true,
+      videoId,
+      title: oembed.title || "Unknown",
+      channelName: oembed.author_name || "Unknown",
+      thumbnail: `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`
+    });
+    
+  } catch (err) {
+    console.error(`[proxy] Error: ${err.message}`);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Get audio URL (redirects to actual audio stream)
 app.get("/audio", async (req, res) => {
   const { videoId } = req.query;
   
@@ -34,67 +64,62 @@ app.get("/audio", async (req, res) => {
     return res.status(400).json({ error: "Missing videoId parameter" });
   }
   
-  console.log(`[proxy] Getting audio for: ${videoId}`);
-  
-  for (const instance of INVIDIOUS_INSTANCES) {
-    try {
-      console.log(`[proxy] Trying: ${instance}`);
-      
-      const url = `${instance}/api/v1/videos/${videoId}`;
-      const response = await fetch(url, { timeout: 10000 });
-      
-      if (!response.ok) {
-        console.log(`[proxy] ${instance} returned ${response.status}`);
-        continue;
+  try {
+    console.log(`[proxy] Getting audio URL for: ${videoId}`);
+    
+    // Fetch YouTube video page
+    const videoUrl = `https://www.youtube.com/watch?v=${videoId}`;
+    const response = await fetch(videoUrl, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
       }
-      
-      const data = await response.json();
-      
-      if (data.error) {
-        console.log(`[proxy] ${instance} error: ${data.error}`);
-        continue;
+    });
+    
+    const html = await response.text();
+    
+    // Look for streaming data in the page
+    const playerResponseMatch = html.match(/"playabilityStatus":\{.*?"configs":\{"playerMicroformatRenderer":(\{.*?\})\}/s);
+    
+    // Try to extract streaming URL from page
+    // Look for adaptiveFormats with audio
+    const streamingMatch = html.match(/"streamingData":\{([^}]+(?:\}[^,])*)/);
+    
+    if (streamingMatch) {
+      const streamingJson = "{" + streamingMatch[1];
+      try {
+        const streaming = JSON.parse(streamingJson);
+        const formats = streaming.formats || streaming.adaptiveFormats || [];
+        const audioFormats = formats.filter(f => f.audioCodec);
+        
+        if (audioFormats.length > 0) {
+          const bestAudio = audioFormats[0];
+          return res.json({
+            success: true,
+            videoId,
+            audioUrl: bestAudio.url,
+            thumbnail: `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`
+          });
+        }
+      } catch (e) {
+        console.log("[proxy] Could not parse streaming data");
       }
-      
-      // Find best audio format
-      const adaptiveFormats = data.adaptiveFormats || [];
-      const audioFormats = adaptiveFormats
-        .filter(f => f.type && f.type.startsWith("audio/"))
-        .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
-      
-      if (audioFormats.length === 0) {
-        console.log(`[proxy] No audio formats found`);
-        continue;
-      }
-      
-      const bestAudio = audioFormats[0];
-      
-      console.log(`[proxy] Success from ${instance}!`);
-      
-      return res.json({
-        success: true,
-        videoId,
-        title: data.title || "Unknown",
-        channelName: data.author || "Unknown",
-        thumbnail: data.thumbnailUrl || `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`,
-        durationSeconds: parseInt(data.lengthSeconds) || 0,
-        audioUrl: bestAudio.url,
-        audioQuality: bestAudio.quality || "audio"
-      });
-      
-    } catch (err) {
-      console.log(`[proxy] ${instance} failed: ${err.message}`);
-      continue;
     }
+    
+    // Fallback: redirect to YouTube embed
+    res.json({
+      success: true,
+      videoId,
+      audioUrl: `https://www.youtube.com/embed/${videoId}?autoplay=1`,
+      thumbnail: `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`,
+      isEmbed: true
+    });
+    
+  } catch (err) {
+    console.error(`[proxy] Error: ${err.message}`);
+    res.status(500).json({ error: err.message });
   }
-  
-  console.log(`[proxy] All instances failed`);
-  return res.status(500).json({ 
-    error: "Could not fetch audio from any Invidious instance",
-    videoId 
-  });
 });
 
 app.listen(PORT, () => {
   console.log(`YouTube Audio Proxy running on port ${PORT}`);
-  console.log(`Endpoints: / (health) and /audio?videoId=ID`);
 });
