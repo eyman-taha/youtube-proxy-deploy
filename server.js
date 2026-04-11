@@ -1,189 +1,90 @@
 /**
- * YouTube Audio Proxy Server v8.0.0
- * Streams audio through the server to bypass CORS on all platforms
+ * YouTube Audio Proxy - v10.0.0
+ * Stable version for Render deployment
  */
 
 import express from "express";
 import cors from "cors";
-import playdl from "play-dl";
-
-const { video_info } = playdl;
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Enable CORS for all origins
-app.use(cors({
-  origin: "*",
-  methods: ["GET", "POST", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With"]
-}));
+// Crash prevention
+process.on('uncaughtException', (err) => console.error('[FATAL]', err.message));
+process.on('unhandledRejection', (reason) => console.error('[REJECTION]', reason));
 
+app.use(cors({ origin: "*", methods: ["GET", "OPTIONS"], allowedHeaders: ["*"] }));
 app.use(express.json());
 
-// Health check
-app.get("/", (req, res) => {
-  res.json({
-    name: "YouTube Audio Proxy",
-    version: "8.0.0",
-    status: "running",
-    description: "Streams audio through server to bypass CORS",
-    endpoints: {
-      health: "/health",
-      audio: "/api/audio?videoId=VIDEO_ID - Get audio stream URL",
-      stream: "/api/stream?videoId=VIDEO_ID - Stream audio directly"
-    }
-  });
-});
+app.get("/health", (req, res) => res.status(200).json({ status: "ok" }));
+app.get("/", (req, res) => res.json({ name: "YouTube Proxy", version: "10.0.0", status: "ok" }));
 
-app.get("/health", (req, res) => {
-  res.json({ status: "ok", timestamp: new Date().toISOString() });
-});
-
-// Get audio URL (returns direct URL - works on mobile)
 app.get("/api/audio", async (req, res) => {
   const { videoId } = req.query;
-
-  if (!videoId) {
-    return res.status(400).json({ error: "Missing videoId parameter" });
-  }
-
+  if (!videoId) return res.status(400).json({ error: "Missing videoId" });
+  
+  console.log('[REQUEST]', videoId);
+  
   try {
-    console.log(`[proxy] Getting audio URL for: ${videoId}`);
-
-    const info = await video_info(`https://www.youtube.com/watch?v=${videoId}`);
-    const videoData = info.video_details;
-    
-    // Find best format with audio
-    let bestFormat = null;
-    for (const format of info.format) {
-      if (format.url && format.audioChannels && format.audioChannels > 0) {
-        if (!bestFormat || (format.bitrate && bestFormat.bitrate && format.bitrate > bestFormat.bitrate)) {
-          bestFormat = format;
+    // YouTube video page
+    const response = await fetch(
+      `https://www.youtube.com/watch?v=${videoId}`,
+      {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+          'Accept-Language': 'en-US,en;q=0.9',
         }
       }
+    );
+    
+    if (!response.ok) {
+      return res.status(502).json({ error: "YouTube unavailable" });
     }
     
-    if (!bestFormat) {
-      bestFormat = info.format.find(f => f.url && f.audioQuality);
+    const html = await response.text();
+    
+    // Extract player response JSON
+    const match = html.match(/"streamingData":(\{.*?\})/s);
+    if (!match) {
+      return res.status(404).json({ error: "No stream data" });
     }
     
-    if (!bestFormat) {
-      bestFormat = info.format.find(f => f.url);
+    let streamingData;
+    try {
+      streamingData = JSON.parse(match[1]);
+    } catch {
+      return res.status(500).json({ error: "Parse error" });
     }
-
-    if (!bestFormat || !bestFormat.url) {
-      return res.status(404).json({ error: "No playable format found" });
+    
+    const formats = streamingData.formats || [];
+    const audioFormats = formats.filter(f => f.audioCodec);
+    
+    if (audioFormats.length === 0) {
+      return res.status(404).json({ error: "No audio" });
     }
-
+    
+    // Best audio
+    audioFormats.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
+    const best = audioFormats[0];
+    
+    console.log('[SUCCESS]', videoId, 'itag:', best.itag);
+    
     res.json({
       success: true,
       videoId,
-      title: videoData.title || "Unknown",
-      channelName: videoData.channel?.name || "Unknown",
-      thumbnail: videoData.thumbnails?.[0]?.url || `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`,
-      duration: videoData.durationInSec || 0,
-      audioUrl: bestFormat.url,
-      audioQuality: bestFormat.audioQuality || "AUDIO_QUALITY_MEDIUM",
-      itag: bestFormat.itag,
-      streamType: "direct"
+      title: "YouTube Audio",
+      thumbnail: `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`,
+      audioUrl: best.url,
+      audioQuality: best.bitrate ? `${Math.round(best.bitrate/1000)}kbps` : "unknown",
+      itag: best.itag
     });
-
+    
   } catch (error) {
-    console.error(`[proxy] Error: ${error.message}`);
+    console.error('[ERROR]', error.message);
     res.status(500).json({ error: error.message });
   }
 });
 
-// Stream audio directly through the server (bypasses CORS for web)
-app.get("/api/stream", async (req, res) => {
-  const { videoId } = req.query;
+app.use((req, res) => res.status(404).json({ error: "Not found" }));
 
-  if (!videoId) {
-    return res.status(400).json({ error: "Missing videoId parameter" });
-  }
-
-  try {
-    console.log(`[proxy] Streaming audio for: ${videoId}`);
-
-    const info = await video_info(`https://www.youtube.com/watch?v=${videoId}`);
-    
-    // Find best audio format
-    let bestFormat = null;
-    for (const format of info.format) {
-      if (format.url && format.audioChannels && format.audioChannels > 0) {
-        if (!bestFormat || (format.bitrate && bestFormat.bitrate && format.bitrate > bestFormat.bitrate)) {
-          bestFormat = format;
-        }
-      }
-    }
-    
-    if (!bestFormat) {
-      bestFormat = info.format.find(f => f.url && f.audioQuality);
-    }
-    
-    if (!bestFormat) {
-      bestFormat = info.format.find(f => f.url);
-    }
-
-    if (!bestFormat || !bestFormat.url) {
-      return res.status(404).json({ error: "No playable format found" });
-    }
-
-    const audioUrl = bestFormat.url;
-    const videoData = info.video_details;
-
-    // Set CORS headers for the stream
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Range');
-    res.setHeader('Content-Type', 'audio/mp4');
-    res.setHeader('Accept-Ranges', 'bytes');
-
-    console.log(`[proxy] Forwarding stream from: ${audioUrl.substring(0, 80)}...`);
-
-    // Stream the audio through the server
-    const streamResponse = await fetch(audioUrl);
-    
-    if (!streamResponse.ok) {
-      console.log(`[proxy] Stream fetch failed: ${streamResponse.status}`);
-      return res.status(502).json({ error: "Failed to fetch audio stream" });
-    }
-
-    // Pipe the stream to response
-    res.setHeader('Content-Length', streamResponse.headers.get('content-length'));
-    
-    streamResponse.body.pipe(res);
-
-  } catch (error) {
-    console.error(`[proxy] Stream error: ${error.message}`);
-    if (!res.headersSent) {
-      res.status(500).json({ error: error.message });
-    }
-  }
-});
-
-app.use((req, res) => {
-  res.status(404).json({ error: "Endpoint not found" });
-});
-
-app.use((err, req, res, next) => {
-  console.error(`[proxy] Server error: ${err.message}`);
-  if (!res.headersSent) {
-    res.status(500).json({ error: "Internal server error" });
-  }
-});
-
-app.listen(PORT, () => {
-  console.log(`
-╔═══════════════════════════════════════════════════════════════════════╗
-║              YouTube Audio Proxy Server v8.0.0                        ║
-║  Server running on: http://localhost:${PORT}                              ║
-║                                                                       ║
-║  Endpoints:                                                          ║
-║    GET /health              - Health check                            ║
-║    GET /api/audio?videoId= - Get audio URL (for mobile)              ║
-║    GET /api/stream?videoId= - Stream audio (for web)                ║
-╚═══════════════════════════════════════════════════════════════════════╝
-  `);
-});
+app.listen(PORT, () => console.log(`Proxy running on ${PORT}`));
