@@ -1,10 +1,11 @@
 /**
- * YouTube Audio Proxy v13.0.0
- * Uses yt.lemnoslife.com API
+ * YouTube Audio Proxy v14.0.0
+ * Uses ytdl-core for reliable extraction
  */
 
 import express from "express";
 import cors from "cors";
+import ytdl from "ytdl-core";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -16,7 +17,7 @@ app.use(cors({ origin: "*", methods: ["GET", "OPTIONS"], allowedHeaders: ["*"] }
 app.use(express.json());
 
 app.get("/health", (req, res) => res.status(200).json({ status: "ok" }));
-app.get("/", (req, res) => res.json({ name: "YouTube Proxy", version: "13.0.0", status: "ok" }));
+app.get("/", (req, res) => res.json({ name: "YouTube Proxy", version: "14.0.0", status: "ok" }));
 
 app.get("/api/stream", async (req, res) => {
   const { videoId } = req.query;
@@ -28,78 +29,40 @@ app.get("/api/stream", async (req, res) => {
   }
   
   try {
-    console.log('[FETCHING] https://yt.lemnoslife.com/videos?part=player&id=' + videoId);
+    console.log('[EXTRACTING] Using ytdl-core for:', videoId);
     
-    const response = await fetch(
-      `https://yt.lemnoslife.com/videos?part=player&id=${videoId}`,
-      {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        },
-        timeout: 15000
-      }
-    );
+    const info = await ytdl.getInfo(videoId);
+    console.log('[TITLE]', info.videoDetails.title);
     
-    console.log('[RESPONSE STATUS]', response.status);
+    const formats = ytdl.filterFormats(info.formats, 'audioonly');
     
-    if (!response.ok) {
-      return res.status(502).json({ error: "fetch failed" });
+    if (formats.length === 0) {
+      console.log('[ERROR] No audio formats found');
+      return res.status(404).json({ error: "No audio format available" });
     }
     
-    const data = await response.json();
-    console.log('[DATA]', JSON.stringify(data).substring(0, 200));
+    formats.sort((a, b) => (b.audioBitrate || 0) - (a.audioBitrate || 0));
+    const bestAudio = formats[0];
     
-    const streamingData = data?.streamingData || data?.data?.streamingData;
-    
-    if (!streamingData) {
-      console.log('[ERROR] No streamingData found');
-      return res.status(404).json({ error: "No streaming data" });
-    }
-    
-    const formats = streamingData.formats || [];
-    const adaptiveFormats = streamingData.adaptiveFormats || [];
-    const allFormats = [...formats, ...adaptiveFormats];
-    
-    const audioFormats = allFormats.filter(f => f.audioCodec && !f.videoCodec);
-    
-    if (audioFormats.length === 0) {
-      const muxedWithAudio = allFormats.filter(f => f.audioCodec);
-      if (muxedWithAudio.length > 0) {
-        muxedWithAudio.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
-        const best = muxedWithAudio[0];
-        console.log('[SUCCESS] Found muxed audio, itag:', best.itag);
-        return res.json({
-          success: true,
-          videoId,
-          title: data.title || "YouTube Audio",
-          thumbnail: `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`,
-          audioUrl: best.url,
-          audioQuality: best.bitrate ? `${Math.round(best.bitrate/1000)}kbps` : "unknown"
-        });
-      }
-      return res.status(404).json({ error: "No audio format" });
-    }
-    
-    audioFormats.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
-    const best = audioFormats[0];
-    
-    console.log('[SUCCESS] audioUrl:', best.url.substring(0, 60) + '...');
+    console.log('[SUCCESS] audioUrl:', bestAudio.url.substring(0, 60) + '...');
+    console.log('[QUALITY]', bestAudio.audioBitrate ? `${bestAudio.audioBitrate}kbps` : 'unknown');
     
     res.json({
       success: true,
       videoId,
-      title: data.title || "YouTube Audio",
+      title: info.videoDetails.title,
       thumbnail: `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`,
-      audioUrl: best.url,
-      audioQuality: best.bitrate ? `${Math.round(best.bitrate/1000)}kbps` : "unknown"
+      audioUrl: bestAudio.url,
+      audioQuality: bestAudio.audioBitrate ? `${bestAudio.audioBitrate}kbps` : "unknown",
+      duration: parseInt(info.videoDetails.lengthSeconds) || 0
     });
     
   } catch (error) {
     console.error('[ERROR]', error.message);
-    res.status(500).json({ error: "fetch failed" });
+    return res.status(500).json({ error: error.message || "audio extraction failed" });
   }
 });
 
 app.use((req, res) => res.status(404).json({ error: "Not found" }));
 
-app.listen(PORT, () => console.log(`Proxy v13.0.0 running on ${PORT}`));
+app.listen(PORT, () => console.log(`Proxy v14.0.0 running on ${PORT}`));
