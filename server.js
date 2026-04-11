@@ -1,6 +1,6 @@
 /**
- * YouTube Audio Proxy Server v7.0.0
- * Uses play-dl to extract audio URLs server-side (bypasses CORS)
+ * YouTube Audio Proxy Server v8.0.0
+ * Streams audio through the server to bypass CORS on all platforms
  */
 
 import express from "express";
@@ -21,32 +21,17 @@ app.use(cors({
 
 app.use(express.json());
 
-// In-memory cache for audio URLs
-const audioCache = new Map();
-const CACHE_TTL = 25 * 60 * 1000; // 25 minutes
-
-function cleanExpiredCache() {
-  const now = Date.now();
-  for (const [key, value] of audioCache.entries()) {
-    if (now - value.timestamp > CACHE_TTL) {
-      audioCache.delete(key);
-    }
-  }
-}
-
-setInterval(cleanExpiredCache, 5 * 60 * 1000);
-
 // Health check
 app.get("/", (req, res) => {
   res.json({
     name: "YouTube Audio Proxy",
-    version: "7.0.0",
+    version: "8.0.0",
     status: "running",
-    library: "play-dl",
+    description: "Streams audio through server to bypass CORS",
     endpoints: {
       health: "/health",
-      audio: "/api/audio?videoId=VIDEO_ID",
-      info: "/api/info?videoId=VIDEO_ID"
+      audio: "/api/audio?videoId=VIDEO_ID - Get audio stream URL",
+      stream: "/api/stream?videoId=VIDEO_ID - Stream audio directly"
     }
   });
 });
@@ -55,36 +40,7 @@ app.get("/health", (req, res) => {
   res.json({ status: "ok", timestamp: new Date().toISOString() });
 });
 
-// Get video info
-app.get("/api/info", async (req, res) => {
-  const { videoId } = req.query;
-
-  if (!videoId) {
-    return res.status(400).json({ error: "Missing videoId parameter" });
-  }
-
-  try {
-    console.log(`[proxy] Getting info for: ${videoId}`);
-    
-    const info = await video_info(`https://www.youtube.com/watch?v=${videoId}`);
-    const videoData = info.video_details;
-    
-    res.json({
-      success: true,
-      videoId,
-      title: videoData.title || "Unknown",
-      channelName: videoData.channel?.name || "Unknown",
-      thumbnail: videoData.thumbnails?.[0]?.url || `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`,
-      duration: videoData.durationInSec || 0,
-      views: videoData.views || 0
-    });
-  } catch (error) {
-    console.error(`[proxy] Error getting info: ${error.message}`);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// Get audio URL - main endpoint
+// Get audio URL (returns direct URL - works on mobile)
 app.get("/api/audio", async (req, res) => {
   const { videoId } = req.query;
 
@@ -92,100 +48,119 @@ app.get("/api/audio", async (req, res) => {
     return res.status(400).json({ error: "Missing videoId parameter" });
   }
 
-  const cacheKey = videoId;
-  const cached = audioCache.get(cacheKey);
-  
-  if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
-    console.log(`[proxy] Cache hit for: ${videoId}`);
-    return res.json(cached.data);
-  }
-
   try {
-    console.log(`[proxy] Extracting audio for: ${videoId}`);
+    console.log(`[proxy] Getting audio URL for: ${videoId}`);
 
-    // Get video info
     const info = await video_info(`https://www.youtube.com/watch?v=${videoId}`);
     const videoData = info.video_details;
     
-    // Get thumbnail
-    const thumbnail = videoData.thumbnails?.[0]?.url || `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`;
-    
-    // Find best format with audio (prefer smaller formats that have audio)
-    // Look for formats with audioChannels property (indicates audio)
-    let bestAudioFormat = null;
-    
+    // Find best format with audio
+    let bestFormat = null;
     for (const format of info.format) {
       if (format.url && format.audioChannels && format.audioChannels > 0) {
-        if (!bestAudioFormat || (format.bitrate && bestAudioFormat.bitrate && format.bitrate > bestAudioFormat.bitrate)) {
-          bestAudioFormat = format;
+        if (!bestFormat || (format.bitrate && bestFormat.bitrate && format.bitrate > bestFormat.bitrate)) {
+          bestFormat = format;
         }
       }
     }
     
-    // If no audio-only, get muxed video with audio
-    if (!bestAudioFormat) {
-      for (const format of info.format) {
-        if (format.url && format.audioQuality) {
-          if (!bestAudioFormat || (format.bitrate && bestAudioFormat.bitrate && format.bitrate > bestAudioFormat.bitrate)) {
-            bestAudioFormat = format;
-          }
-        }
-      }
+    if (!bestFormat) {
+      bestFormat = info.format.find(f => f.url && f.audioQuality);
     }
     
-    // Fallback to any format with URL
-    if (!bestAudioFormat) {
-      bestAudioFormat = info.format.find(f => f.url);
+    if (!bestFormat) {
+      bestFormat = info.format.find(f => f.url);
     }
-    
-    if (!bestAudioFormat || !bestAudioFormat.url) {
-      console.log(`[proxy] No playable format found`);
+
+    if (!bestFormat || !bestFormat.url) {
       return res.status(404).json({ error: "No playable format found" });
     }
 
-    const result = {
+    res.json({
       success: true,
       videoId,
       title: videoData.title || "Unknown",
       channelName: videoData.channel?.name || "Unknown",
-      thumbnail,
+      thumbnail: videoData.thumbnails?.[0]?.url || `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`,
       duration: videoData.durationInSec || 0,
-      audioUrl: bestAudioFormat.url,
-      audioQuality: bestAudioFormat.audioQuality || "AUDIO_QUALITY_MEDIUM",
-      itag: bestAudioFormat.itag,
-      mimeType: bestAudioFormat.mimeType || ""
-    };
-
-    // Cache result
-    audioCache.set(cacheKey, { data: result, timestamp: Date.now() });
-
-    console.log(`[proxy] Success! Itag: ${result.itag}, Quality: ${result.audioQuality}`);
-    res.json(result);
+      audioUrl: bestFormat.url,
+      audioQuality: bestFormat.audioQuality || "AUDIO_QUALITY_MEDIUM",
+      itag: bestFormat.itag,
+      streamType: "direct"
+    });
 
   } catch (error) {
     console.error(`[proxy] Error: ${error.message}`);
-    
-    let statusCode = 500;
-    let errorMessage = error.message;
-    
-    if (errorMessage.includes("Video unavailable") || errorMessage.includes("NOT_FOUND")) {
-      statusCode = 404;
-      errorMessage = "Video is unavailable or has been removed";
-    } else if (errorMessage.includes("private")) {
-      statusCode = 403;
-      errorMessage = "This video is private";
-    } else if (errorMessage.includes("age")) {
-      statusCode = 403;
-      errorMessage = "This video is age-restricted";
-    }
-    
-    res.status(statusCode).json({ error: errorMessage });
+    res.status(500).json({ error: error.message });
   }
 });
 
-app.post("/api/cache/clear", (req, res) => {
-  audioCache.clear();
-  res.json({ success: true, message: "Cache cleared" });
+// Stream audio directly through the server (bypasses CORS for web)
+app.get("/api/stream", async (req, res) => {
+  const { videoId } = req.query;
+
+  if (!videoId) {
+    return res.status(400).json({ error: "Missing videoId parameter" });
+  }
+
+  try {
+    console.log(`[proxy] Streaming audio for: ${videoId}`);
+
+    const info = await video_info(`https://www.youtube.com/watch?v=${videoId}`);
+    
+    // Find best audio format
+    let bestFormat = null;
+    for (const format of info.format) {
+      if (format.url && format.audioChannels && format.audioChannels > 0) {
+        if (!bestFormat || (format.bitrate && bestFormat.bitrate && format.bitrate > bestFormat.bitrate)) {
+          bestFormat = format;
+        }
+      }
+    }
+    
+    if (!bestFormat) {
+      bestFormat = info.format.find(f => f.url && f.audioQuality);
+    }
+    
+    if (!bestFormat) {
+      bestFormat = info.format.find(f => f.url);
+    }
+
+    if (!bestFormat || !bestFormat.url) {
+      return res.status(404).json({ error: "No playable format found" });
+    }
+
+    const audioUrl = bestFormat.url;
+    const videoData = info.video_details;
+
+    // Set CORS headers for the stream
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Range');
+    res.setHeader('Content-Type', 'audio/mp4');
+    res.setHeader('Accept-Ranges', 'bytes');
+
+    console.log(`[proxy] Forwarding stream from: ${audioUrl.substring(0, 80)}...`);
+
+    // Stream the audio through the server
+    const streamResponse = await fetch(audioUrl);
+    
+    if (!streamResponse.ok) {
+      console.log(`[proxy] Stream fetch failed: ${streamResponse.status}`);
+      return res.status(502).json({ error: "Failed to fetch audio stream" });
+    }
+
+    // Pipe the stream to response
+    res.setHeader('Content-Length', streamResponse.headers.get('content-length'));
+    
+    streamResponse.body.pipe(res);
+
+  } catch (error) {
+    console.error(`[proxy] Stream error: ${error.message}`);
+    if (!res.headersSent) {
+      res.status(500).json({ error: error.message });
+    }
+  }
 });
 
 app.use((req, res) => {
@@ -194,19 +169,21 @@ app.use((req, res) => {
 
 app.use((err, req, res, next) => {
   console.error(`[proxy] Server error: ${err.message}`);
-  res.status(500).json({ error: "Internal server error" });
+  if (!res.headersSent) {
+    res.status(500).json({ error: "Internal server error" });
+  }
 });
 
 app.listen(PORT, () => {
   console.log(`
 ╔═══════════════════════════════════════════════════════════════════════╗
-║              YouTube Audio Proxy Server v7.0.0                        ║
-║  Library: play-dl                                                    ║
+║              YouTube Audio Proxy Server v8.0.0                        ║
 ║  Server running on: http://localhost:${PORT}                              ║
+║                                                                       ║
 ║  Endpoints:                                                          ║
 ║    GET /health              - Health check                            ║
-║    GET /api/info?videoId=   - Get video metadata                      ║
-║    GET /api/audio?videoId= - Get audio stream URL                    ║
+║    GET /api/audio?videoId= - Get audio URL (for mobile)              ║
+║    GET /api/stream?videoId= - Stream audio (for web)                ║
 ╚═══════════════════════════════════════════════════════════════════════╝
   `);
 });
